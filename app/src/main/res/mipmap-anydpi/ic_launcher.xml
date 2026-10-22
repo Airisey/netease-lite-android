@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自适应图标。前景是「白色月牙 + 音符」，由 tools/make-icon.py 从桌面端的
+  renderer/assets/icon.png 抠出来并按安全区（直径 66dp 的圆）缩放；
+  背景是纯色。
+
+  minSdk 26 正好是自适应图标的起点，所以这里不需要 mipmap-anydpi-v26 那层
+  版本目录，直接写 anydpi 即可。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

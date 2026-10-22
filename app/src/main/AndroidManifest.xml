@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 联网取歌、取歌词、取封面。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 后台播放：播放期间服务是前台服务，没有这两条系统会在几秒后掐掉。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Android 13 起通知要用户授权，不申请的话通知栏控制就是空的。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 息屏继续播放。ExoPlayer 的 setWakeMode 需要它。 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+      不申请 READ_MEDIA_AUDIO / READ_EXTERNAL_STORAGE：
+      本地音乐扫描走 SAF（用户自己选文件夹），拿到的 content:// 树由系统授权，
+      比「申请全盘读取权限」既更少权限也更容易过审。
+    -->
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="false"
+        android:usesCleartextTraffic="false"
+        android:theme="@style/Theme.NeteaseLite">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          MediaSessionService：通知栏 / 锁屏 / 蓝牙按键三件事全由它和 Media3 负责。
+          foregroundServiceType 必须是 mediaPlayback —— 否则 Android 14 起
+          启动前台服务会直接抛 ForegroundServiceStartNotAllowedException。
+          exported="true" 是系统媒体控制（以及车机）能连上这个会话的前提。
+        -->
+        <service
+            android:name=".play.PlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+
+        <!-- 蓝牙/有线耳机上的播放键：系统把按键事件发给这个广播接收器。 -->
+        <receiver
+            android:name="androidx.media3.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>

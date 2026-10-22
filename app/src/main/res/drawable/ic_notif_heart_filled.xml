@@ -1,0 +1,34 @@
+<!--
+  通知栏「喜欢（已红心）」图标。
+
+  用户 m00932 第⑥点要求红心与循环这两颗比中间三颗小一点，m03123 第①点又说
+  「还是太大」，m09508 第⑧点又说「外围加一圈空白遮罩」，所以比例改了三轮。
+
+  做法不是改 drawable 尺寸（24dp 的槽位是系统给的，改不动），而是把图形在
+  24×24 的 viewport 里缩到正中 —— 四周留白，视觉上就小了一圈。
+
+  **比例是量出来的，不是拍的**：Media3 自带的上一首/下一首图形只占 960
+  viewport 里的 520（54%），而我们的红心路径占 24 里的 20（83%），所以最早那版
+  0.72 出来是 60%，反而比「上一首」还大。改成 0.54 之后实机量到红心 26px、
+  上一首 34px，只小了 24%，用户仍然说大。再按「图形占槽位 35%」定成 0.42 ——
+  实机量到红心 20px、上一首 34px。
+
+  这一版从 0.42 收到 **0.34**：红心外接盒约 16px、四周各留约 4px 空白，
+  与中间三颗 34px 的对比一眼能看出来。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <group
+        android:scaleX="0.34"
+        android:scaleY="0.34"
+        android:pivotX="12"
+        android:pivotY="12">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M12,21.35l-1.45,-1.32C5.4,15.36 2,12.28 2,8.5 2,5.42 4.42,3 7.5,3c1.74,0 3.41,0.81 4.5,2.09C13.09,3.81 14.76,3 16.5,3 19.58,3 22,5.42 22,8.5c0,3.78 -3.4,6.86 -8.55,11.54L12,21.35z" />
+    </group>
+</vector>

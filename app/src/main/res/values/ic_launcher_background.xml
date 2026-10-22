@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      图标底色。取自源图那块红底的实测均值（用户 m08537 第⑧点换图时由
+      tools/make-icon.py 自动写入）。
+      刻意不放一张背景位图：纯色背景交给系统拉伸不会有任何模糊，
+      而且自适应图标会被启动器裁成圆形 / 方形 / 水滴形，位图四角本来就要被切掉。
+    -->
+    <color name="ic_launcher_background">#F86057</color>
+</resources>

@@ -1,0 +1,25 @@
+<!--
+  通知栏「单曲循环」图标：循环箭头里一个「1」。
+
+  用户 m03577 第⑥点之前这一档是缺失的（三档里留的是「列表循环」），所以通知栏
+  切到单曲循环时画的是列表循环的图形 —— 用户看到的「单曲循环图标错误」就是它。
+  图形与界面侧 `Icons.RepeatOne` 同一份路径，只是这边要按 0.34 缩小
+  （缩放理由见 ic_notif_heart_filled.xml，用户 m00932 第⑥点 / m03123 第①点 /
+  m09508 第⑧点）。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <group
+        android:scaleX="0.34"
+        android:scaleY="0.34"
+        android:pivotX="12"
+        android:pivotY="12">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M7,7h10v3l4,-4 -4,-4v3H5v6h2V7zM17,17H7v-3l-4,4 4,4v-3h12v-6h-2v4zM13,15V9h-1l-2,1v1h1.5v4H13z" />
+    </group>
+</vector>

@@ -1,0 +1,26 @@
+# Gradle / 构建产物
+.gradle/
+.kotlin/
+build/
+app/build/
+
+# 本机 Android SDK 路径（gradle 也从 ANDROID_HOME 读）
+local.properties
+
+# 签名私钥与口令：不进仓库（缺失时 assembleRelease 自动退回 debug 签名）
+keystore/
+
+# 开发期的临时脚本、设备抓图与原始数据
+_probe/
+
+# 打包产物
+*.apk
+*.aab
+
+# Windows 杂项
+Thumbs.db
+desktop.ini
+
+# 下载算术验证的中间产物（tools/run-download-math.ps1 生成）
+tools/out-math/
+
