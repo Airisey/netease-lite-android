@@ -1,5 +1,6 @@
 package com.netease.lite.ui
 
+import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -870,6 +871,130 @@ fun PodcastsPage(vm: AppViewModel) {
     }
 }
 
+/**
+ * 音乐云盘（用户 m05071 第④点）。
+ *
+ * 只读列表：云盘里是用户自己上传的音频，上传/删除都留给官方客户端，误删原文件
+ * 的代价太大。页头副标题给「总数 + 已用/总容量」——这两项只有云盘接口会回。
+ */
+@Composable
+fun CloudPage(vm: AppViewModel) {
+    val s = skin
+    // 搜索在**已经取回来的列表**里过滤（用户 m05718），不再打接口：云盘一次也就
+    // 几千首，本地过滤即时出结果，也不会把关键词当成全站搜索跳走。
+    var searching by remember { mutableStateOf(false) }
+    var q by remember { mutableStateOf("") }
+    val key = q.trim()
+    val shown = if (key.isEmpty()) vm.cloudSongs else vm.cloudSongs.filter {
+        val hay = "${it.name} ${it.artists.joinToString(" ") { a -> a.name }} ${it.albumName}"
+        hay.contains(key, ignoreCase = true)
+    }
+
+    // SAF 选文件：OpenDocument 而不是 GetContent —— 前者给的 Uri 有读权限、
+    // 能拿到 DISPLAY_NAME，上传时文件名才有意义。
+    val pickAudio = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) vm.uploadToCloud(uri)
+    }
+
+    val sub = when {
+        !vm.loggedIn -> "登录后同步你的云盘"
+        vm.cloudSongs.isEmpty() -> "共 0 首 · 云盘占用 0 B"
+        // 与「已下载音乐」页同一口径（用户 m05942 第③点）：总数拿不到就只显示占用
+        vm.cloudMaxSize > 0 ->
+            "共 ${vm.cloudCount} 首 · 云盘占用 ${fmtBytes(vm.cloudSize)} / ${fmtBytes(vm.cloudMaxSize)}"
+        else -> "共 ${vm.cloudCount} 首 · 云盘占用 ${fmtBytes(vm.cloudSize)}"
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        PageShell(
+            vm,
+            vm.cloudSongs.isEmpty(),
+            if (vm.loggedIn) "云盘里还没有歌，点右下角的「上传」把本机的歌传上去" else "登录后查看音乐云盘",
+        ) {
+            SongList(vm, shown, contextId = 0, contextName = "音乐云盘") {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) { PageTitle("音乐云盘", sub) }
+                        // 右上角搜索按钮：展开 / 收起输入框，收起时清空关键词。
+                        PillButton(if (searching) "收起" else "搜索") {
+                            searching = !searching
+                            if (!searching) q = ""
+                        }
+                        Spacer(Modifier.width(16.dp))
+                    }
+                    if (searching) {
+                        OutlinedTextField(
+                            value = q,
+                            onValueChange = { q = it },
+                            singleLine = true,
+                            placeholder = { Text("在云盘里搜索歌名 / 歌手 / 专辑", color = s.text3, fontSize = 12.sp) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, color = s.text0),
+                        )
+                        Text(
+                            if (key.isEmpty()) "" else "${shown.size} / ${vm.cloudSongs.size}",
+                            color = s.text3,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                        )
+                        if (key.isNotEmpty() && shown.isEmpty()) {
+                            Text(
+                                "没有匹配的歌，换个关键词试试",
+                                color = s.text2,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 底部上传条（用户 m05718）：浮在列表上方，带一层底色，滚到最后一首时
+        // 文字不会和按钮叠在一起看不清。
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(s.bg0.copy(alpha = 0.92f))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                vm.cloudUploadNote.ifEmpty {
+                    when (val stage = vm.cloudUploading) {
+                        null -> "把手机里的歌传到云盘，传完立刻出现在列表里"
+                        else -> "正在${stage}…"
+                    }
+                },
+                color = if (vm.cloudUploadNote.startsWith("上传失败")) s.accent else s.text2,
+                fontSize = 11.sp,
+                maxLines = 2,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(12.dp))
+            PillButton(
+                if (vm.cloudUploading != null) "上传中…" else "上传",
+                primary = true,
+            ) {
+                if (vm.cloudUploading == null) pickAudio.launch(arrayOf("audio/*"))
+            }
+        }
+    }
+}
+
+/** 字节数 -> 人类可读（云盘容量用）。 */
+private fun fmtBytes(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val units = listOf("KB", "MB", "GB", "TB")
+    var v = bytes.toDouble() / 1024
+    var i = 0
+    while (v >= 1024 && i < units.size - 1) { v /= 1024; i++ }
+    return (if (v >= 100) "%.0f".format(v) else "%.1f".format(v)) + " " + units[i]
+}
+
 @Composable
 fun LikedPage(vm: AppViewModel) {
     PageShell(vm, vm.likedSongs.isEmpty(), "还没有收藏的歌曲") {
@@ -1571,7 +1696,32 @@ private fun AboutSettings(vm: AppViewModel) {
     )
 
     GroupTitle("关于")
-    SettingRow(title = "版本", sub = "1.0.0 (1)", checked = false, onClick = {})
+    // 版本号从 PackageManager 读，不再写死 —— 写死的结果就是升级后还显示 1.0.0。
+    val ctx = LocalContext.current
+    val version = remember {
+        runCatching {
+            @Suppress("DEPRECATION")
+            ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
+        }.getOrNull() ?: "—"
+    }
+    val open = { url: String ->
+        runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+        Unit
+    }
+    SettingRow(title = "版本", sub = version, checked = false, onClick = {})
+    // 仓库地址（用户 m05071 第③点）：点一下用浏览器打开。
+    SettingRow(
+        title = "GitHub 仓库",
+        sub = "github.com/Airisey/netease-lite-android",
+        checked = false,
+        onClick = { open("https://github.com/Airisey/netease-lite-android") },
+    )
+    SettingRow(
+        title = "电脑版",
+        sub = "github.com/Airisey/netease-lite",
+        checked = false,
+        onClick = { open("https://github.com/Airisey/netease-lite") },
+    )
     SettingRow(title = "恢复默认设置", sub = "皮肤与账号不受影响", checked = false, onClick = { vm.resetSettings() })
     Text(
         "网易云音乐 Lite · Android\n非官方客户端，仅供学习交流。",

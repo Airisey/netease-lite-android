@@ -225,6 +225,7 @@ fun AppShell(vm: AppViewModel) {
                         is Route.Recommend -> RecommendPage(vm)
                         is Route.Charts -> ChartsPage(vm)
                         is Route.Podcasts -> PodcastsPage(vm)
+                        is Route.Cloud -> CloudPage(vm)
                         is Route.Liked -> LikedPage(vm)
                         is Route.Recent -> RecentPage(vm)
                         is Route.Downloads -> DownloadsPage(vm)
@@ -282,7 +283,7 @@ private fun routeKey(r: Route): String = when (r) {
 private fun routeDepth(r: Route): Int = when (r) {
     is Route.Daily, is Route.Startup, is Route.Recommend, is Route.Charts,
     is Route.Podcasts, is Route.Liked, is Route.Recent, is Route.Downloads,
-    is Route.Downloading,
+    is Route.Downloading, is Route.Cloud,
     is Route.Settings -> 0
     is Route.Playlist, is Route.Album, is Route.Artist, is Route.User,
     is Route.Podcast, is Route.Search -> 1
@@ -458,6 +459,7 @@ private fun titleOf(r: Route): String = when (r) {
     is Route.Recommend -> "推荐歌单"
     is Route.Charts -> "榜单"
     is Route.Podcasts -> "播客"
+    is Route.Cloud -> "音乐云盘"
     is Route.Liked -> "我喜欢的音乐"
     is Route.Recent -> "最近播放"
     is Route.Downloads -> "已下载音乐"
@@ -555,6 +557,10 @@ private fun Sidebar(vm: AppViewModel, onPick: () -> Unit) {
         }
         if ("podcast" !in hidden) {
             SideItem(Icons.Podcast, "播客", vm.route is Route.Podcasts) { vm.go(Route.Podcasts); onPick() }
+        }
+        // 音乐云盘（用户 m05071 第④点）：排在「播客」下面，与电脑端一致。
+        if ("cloud" !in hidden) {
+            SideItem(Icons.Download, "音乐云盘", vm.route is Route.Cloud) { vm.go(Route.Cloud); onPick() }
         }
 
         SideGroup("我的音乐")

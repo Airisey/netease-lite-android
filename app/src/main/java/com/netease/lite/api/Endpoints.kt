@@ -391,6 +391,244 @@ object Endpoints {
         return j.optInt("code", 500) == 200
     }
 
+    // ------------------------------------------------------------ 音乐云盘
+
+    /**
+     * 音乐云盘的一页（用户 m05071 第④点）。
+     *
+     * 形状与桌面版 `endpoints.cloudSongs` 完全一致：歌曲数组在 `data`（**不是**
+     * `songs`，这个接口和别的接口不一样），`count` 是总数，`size` / `maxSize`
+     * 是已用与总容量，`hasMore` 表示还有下一页。
+     *
+     * 只读：上传和删除都不做。云盘里是用户自己的音频文件，误删的代价远大于
+     * 「少两个按钮」的不方便。
+     */
+    suspend fun cloudSongs(limit: Int = 500, offset: Int = 0): CloudPage {
+        val j = Client.tryGet("/api/cloud/get", mapOf("limit" to limit, "offset" to offset))
+        val arr = j.optJSONArray("data")
+        val songs = ArrayList<Song>(arr?.length() ?: 0)
+        for (i in 0 until (arr?.length() ?: 0)) cloudItem(arr?.optJSONObject(i))?.let { songs.add(it) }
+        return CloudPage(
+            songs = songs,
+            count = j.optInt("count", 0),
+            size = j.optLong("size", 0L),
+            maxSize = j.optLong("maxSize", 0L),
+            more = j.optBoolean("hasMore", false),
+        )
+    }
+
+    /**
+     * 云盘列表项 → [Song]。
+     *
+     * 云盘的每条**不是**标准歌曲结构：顶层是 `songId / songName / artist / album /
+     * fileName / fileSize`，真正的歌曲信息塞在 `simpleSong` 里。以前这里直接丢给
+     * `parseSongs`，`id` 与 `name` 都取不到（都是 0 和空串），列表于是「有 count 没歌」。
+     *
+     * 所以优先解析 `simpleSong`；万一它缺失（老账号/未匹配成功的文件），用顶层的
+     * 文件名兜底造一条 —— 列表至少能显示出来，点进去取流会失败，但比空白强。
+     */
+    private fun cloudItem(it: JSONObject?): Song? {
+        if (it == null) return null
+        it.optJSONObject("simpleSong")?.let { s ->
+            parseSong(s)?.let { song -> return song }
+        }
+        val fileName = it.optString("fileName").ifEmpty { it.optString("songName") }
+        if (fileName.isEmpty()) return null
+        val base = fileName.substringBeforeLast('.').ifEmpty { fileName }
+        val dash = base.indexOf(" - ")
+        val artist = it.optString("artist").ifEmpty { if (dash > 0) base.substring(0, dash).trim() else "" }
+        val title = it.optString("songName").ifEmpty { if (dash > 0) base.substring(dash + 3).trim() else base }
+        return Song(
+            id = it.optLong("songId", 0L),
+            name = title,
+            artists = if (artist.isEmpty()) emptyList() else listOf(Artist(0L, artist)),
+            albumName = it.optString("album"),
+            duration = 0L,
+            cover = httpsUrl(it.optString("cover")),
+            unavailable = false,
+        )
+    }
+
+    /** 音乐云盘的一页读数，见 [cloudSongs]。 */
+    data class CloudPage(
+        val songs: List<Song>,
+        val count: Int,
+        val size: Long,
+        val maxSize: Long,
+        val more: Boolean,
+    )
+
+    // ------------------------------------------------------------ 云盘上传
+
+    /** 一次云盘上传的结果；失败时 [error] 是可以直接显示的一句话。 */
+    data class CloudUploadResult(val ok: Boolean, val songId: Long, val name: String, val error: String = "")
+
+    /**
+     * 把一个本地音频文件上传到音乐云盘（用户 m05718）。
+     *
+     * 流程与桌面端 `electron/cloud-upload.js` 完全一致，也和参考实现
+     * （NeteaseCloudMusicApi `module/cloud.js`）对齐：
+     *
+     *   1. /weapi/cloud/upload/check  报 md5 + 字节数 → songId、needUpload
+     *   2. /weapi/nos/token/alloc     换 objectKey / token / resourceId
+     *   3. GET https://wanproxy.127.net/lbs 问上传节点
+     *   4. POST <节点>/<bucket>/<key>?offset=0&complete=true&version=1.0 传本体
+     *   5. /weapi/upload/cloud/info/v2 登记元信息 → /weapi/cloud/pub/v2 发布
+     *
+     * [onStage] 会把当前阶段（校验 / 准备 / 上传 / 入库）报给界面，用一句
+     * 人话显示。文件整块读进内存：云盘单曲上限 200MB 左右，手机上这一档
+     * 还能接受，切片反而更容易被 NOS 判成未完成。
+     */
+    suspend fun cloudUpload(
+        context: android.content.Context,
+        uri: android.net.Uri,
+        onStage: (String) -> Unit = {},
+    ): CloudUploadResult {
+        val name = displayName(context, uri) ?: "cloud-${System.currentTimeMillis()}.mp3"
+        val bytes = try {
+            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        } catch (e: Exception) {
+            null
+        } ?: return CloudUploadResult(false, 0, name, "读不到这个文件")
+        if (bytes.isEmpty()) return CloudUploadResult(false, 0, name, "文件是空的")
+
+        val md5 = md5Hex(bytes)
+        val ext = name.substringAfterLast('.', "mp3").lowercase()
+        val type = when (ext) {
+            "flac" -> "audio/flac"
+            "wav" -> "audio/wav"
+            "m4a" -> "audio/mp4"
+            "aac" -> "audio/aac"
+            "ogg" -> "audio/ogg"
+            else -> "audio/mpeg"
+        }
+        val song = name.substringBeforeLast('.').ifEmpty { name }
+        val bare = name.replace(" ", "").replace(".", "_")
+
+        onStage("校验")
+        val check = try {
+            Client.post(
+                "/cloud/upload/check",
+                JSONObject()
+                    .put("bitrate", "999000")
+                    .put("ext", "")
+                    .put("length", bytes.size)
+                    .put("md5", md5)
+                    .put("songId", "0")
+                    .put("version", 1),
+            )
+        } catch (e: Exception) {
+            return CloudUploadResult(false, 0, name, e.message ?: "校验失败")
+        }
+        val needUpload = check.optBoolean("needUpload", true)
+        // songId 在这里是一串 128 位十六进制（导入凭证），不是数字 —— 必须原样
+        // 传给 /upload/cloud/info/v2，取成 Long 会变成 0，登记就无从下手。
+        val importId = check.optString("songId")
+
+        onStage("准备")
+        val token = try {
+            Client.post(
+                "/nos/token/alloc",
+                JSONObject()
+                    .put("bucket", CLOUD_BUCKET)
+                    .put("ext", ext)
+                    .put("filename", bare)
+                    .put("local", false)
+                    .put("nos_product", 3)
+                    .put("type", "audio")
+                    .put("md5", md5),
+            ).optJSONObject("result") ?: JSONObject()
+        } catch (e: Exception) {
+            return CloudUploadResult(false, 0, name, e.message ?: "拿不到上传凭证")
+        }
+        val resourceId = token.optString("resourceId")
+        val objectKey = token.optString("objectKey").replace("/", "%2F")
+
+        if (needUpload) {
+            onStage("上传")
+            val host = try {
+                Client.get(
+                    "/lbs",
+                    mapOf("version" to "1.0", "bucketname" to CLOUD_BUCKET),
+                    base = "https://wanproxy.127.net",
+                ).optJSONArray("upload")?.optString(0).orEmpty()
+            } catch (e: Exception) {
+                ""
+            }
+            if (host.isEmpty()) return CloudUploadResult(false, 0, name, "拿不到上传节点")
+            // lbs 给的是 `http://nosup-jd1.127.net`，而 manifest 里
+            // `usesCleartextTraffic="false"`（安卓 9+ 默认）→ 明文 http 会被系统直接拦掉，
+            // 表现就是「网络请求失败」。NOS 支持 https，统一升级协议再传。
+            val node = host.trimEnd('/').let { if (it.startsWith("http://")) "https://" + it.removePrefix("http://") else it }
+            val url = "$node/$CLOUD_BUCKET/$objectKey?offset=0&complete=true&version=1.0"
+            try {
+                Client.postBytes(
+                    url,
+                    bytes,
+                    mapOf(
+                        "x-nos-token" to token.optString("token"),
+                        "Content-MD5" to md5,
+                        "Content-Type" to type,
+                    ),
+                )
+            } catch (e: Exception) {
+                return CloudUploadResult(false, 0, name, e.message ?: "上传失败")
+            }
+        }
+
+        onStage("入库")
+        val info = try {
+            Client.post(
+                "/upload/cloud/info/v2",
+                JSONObject()
+                    .put("md5", md5)
+                    .put("songid", importId)
+                    .put("filename", name)
+                    .put("song", song)
+                    .put("album", "未知专辑")
+                    .put("artist", "未知艺术家")
+                    .put("bitrate", "999000")
+                    .put("resourceId", resourceId),
+            )
+        } catch (e: Exception) {
+            return CloudUploadResult(false, 0, name, e.message ?: "入库失败")
+        }
+        val songId = info.optLong("songId", 0L)
+        // 发布失败不算上传失败：文件已经在云盘里，只是列表里还没出现。
+        if (songId > 0) {
+            try {
+                Client.post("/cloud/pub/v2", JSONObject().put("songid", songId))
+            } catch (_: Exception) {
+                // 忽略
+            }
+        }
+        return CloudUploadResult(true, songId, song)
+    }
+
+    /** 云盘桶名：服务端只认这一个（私云音频）。 */
+    private const val CLOUD_BUCKET = "jd-musicrep-privatecloud-audio-public"
+
+    /** SAF Uri 的显示文件名；拿不到就回 null。 */
+    /** SAF 选中的文件显示名（云盘上传时要它当歌名，所以也公开给 ViewModel 做去重）。 */
+    fun displayName(context: android.content.Context, uri: android.net.Uri): String? {
+        if (uri.scheme == "file") return uri.lastPathSegment
+        return try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (i >= 0 && c.moveToFirst()) c.getString(i) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun md5Hex(bytes: ByteArray): String {
+        val d = java.security.MessageDigest.getInstance("MD5").digest(bytes)
+        val sb = StringBuilder(d.size * 2)
+        for (b in d) sb.append(String.format("%02x", b))
+        return sb.toString()
+    }
+
     // ------------------------------------------------------------ 搜索
 
     /**

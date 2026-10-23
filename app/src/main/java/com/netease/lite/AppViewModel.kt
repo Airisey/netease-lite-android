@@ -267,6 +267,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val recommend = mutableStateListOf<Playlist>()
     val charts = mutableStateListOf<Playlist>()
     val podcasts = mutableStateListOf<Playlist>()
+    /** 音乐云盘（用户 m05071 第④点）。 */
+    val cloudSongs = mutableStateListOf<Song>()
+    var cloudCount: Int by mutableStateOf(0)
+    var cloudSize: Long by mutableStateOf(0L)
+    var cloudMaxSize: Long by mutableStateOf(0L)
     val searchSongs = mutableStateListOf<Song>()
     val searchPlaylists = mutableStateListOf<Playlist>()
     val searchArtists = mutableStateListOf<ArtistProfile>()
@@ -364,6 +369,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     init {
         restoreAccount()
         recent.addAll(songsFromJsonArray(prefs.recent))
+        // 本地索引是上次退出时留下的，启动就把它读进来（用户 m05071 第②点）：
+        // 侧栏「已下载音乐」的角标不用等进过那一页才显示，进页面时 loadDownloads
+        // 再按索引补齐歌曲详情。
+        localCount = local.count
+        localDir = local.dirs.firstOrNull().orEmpty()
         bindPlayer()
         // 下载完成的歌登记进本地索引：落盘目录是公共音乐目录，不在用户 SAF 选的
         // 那棵树里，扫描永远扫不到，只能在这里显式登记。
@@ -1156,6 +1166,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             is Route.Recommend -> loadRecommend()
             is Route.Charts -> loadCharts()
             is Route.Podcasts -> loadPodcasts()
+            // 音乐云盘（m05071 第④点）：内容随时可能在手机上变，进页面就拉一次。
+            is Route.Cloud -> loadCloud()
             is Route.Liked -> loadLiked()
             is Route.Recent -> Unit
             is Route.Downloads -> Unit
@@ -1300,7 +1312,90 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.Main) { podcasts.clear(); podcasts.addAll(p) }
     }
 
+    // ------------------------------------------------------------------ 音乐云盘
+
+    /**
+     * 云盘上传的当前阶段（「校验」/「准备」/「上传」/「入库」），null = 没在传。
+     * 界面拿它显示按钮上的进度文案，同时禁用按钮防重复点击。
+     */
+    var cloudUploading: String? by mutableStateOf(null)
+        private set
+
+    /** 云盘上传的结果提示（成功一首 / 失败原因），显示在底部上传条上。 */
+    var cloudUploadNote: String by mutableStateOf("")
+
+    /**
+     * 上传一个本地音频到云盘（用户 m05718）。
+     *
+     * 文件从 SAF 的 Uri 读，整块交给 [Endpoints.cloudUpload]；成功后顺手刷新
+     * 列表，让新歌马上出现在页面上。同一时刻只允许一首在传 —— 并发上传会被
+     * NOS 按账号限速，反而更慢。
+     */
+    fun uploadToCloud(uri: android.net.Uri) {
+        if (!loggedIn) {
+            notify("登录后才能上传到云盘")
+            return
+        }
+        if (cloudUploading != null) {
+            notify("正在上传，等这一首传完")
+            return
+        }
+        // 云盘里已经有「标题 + 歌手」都一样的歌就不再传一遍（用户 m05942 第②点）。
+        // 判断放在读文件之前：撞车时连字节都不用读，省一次 20MB 的内存拷贝。
+        val dupName = runCatching {
+            val n = Endpoints.displayName(getApplication(), uri) ?: ""
+            n.substringBeforeLast('.')
+        }.getOrNull().orEmpty()
+        if (dupName.isNotEmpty() && cloudHasSong(dupName)) {
+            val msg = "有 1 首歌在云盘歌单中已存在，上传时已跳过"
+            cloudUploadNote = msg
+            notify(msg)
+            return
+        }
+        viewModelScope.launch {
+            cloudUploading = "校验"
+            cloudUploadNote = ""
+            val r = Endpoints.cloudUpload(getApplication(), uri) { stage ->
+                cloudUploading = stage
+            }
+            cloudUploading = null
+            if (r.ok) {
+                cloudUploadNote = "已上传《${r.name}》"
+                notify("已上传《${r.name}》")
+                fetchCloud(true)
+            } else {
+                cloudUploadNote = "上传失败：${r.error}"
+                notify("上传失败：${r.error}")
+            }
+        }
+    }
+
+    /**
+     * 音乐云盘（用户 m05071 第④点）。
+     *
+     * 未登录时直接给空列表：接口会回 301，报错弹「请先登录」很吵，而这一页自己
+     * 已经有「登录后才能看」的空态文案，交给它更清楚。
+     */
+    fun loadCloud() = viewModelScope.launch { fetchCloud(false) }
+
+    private suspend fun fetchCloud(quiet: Boolean) {
+        if (!loggedIn) {
+            withContext(Dispatchers.Main) { cloudSongs.clear(); cloudCount = 0 }
+            return
+        }
+        page(quiet) {
+            val p = Endpoints.cloudSongs()
+            withContext(Dispatchers.Main) {
+                cloudSongs.clear(); cloudSongs.addAll(p.songs)
+                cloudCount = p.count
+                cloudSize = p.size
+                cloudMaxSize = p.maxSize
+            }
+        }
+    }
+
     fun loadLiked() = viewModelScope.launch { fetchLiked(false) }
+
     private suspend fun fetchLiked(quiet: Boolean) {
         val uid = me?.id ?: return
         page(quiet) {
@@ -1765,14 +1860,78 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun downloadMany(songs: List<Song>) {
         if (songs.isEmpty()) return
         var n = 0
+        var skipped = 0
         for (s in songs) {
             val uri = local.uriOf(s.id)
-            if (uri != null && local.exists(uri)) continue
+            if (uri != null && local.exists(uri)) { skipped++; continue }
             if (uri != null) local.remove(s.id)
             downloader.enqueue(s, downloadQuality)
             n++
         }
-        toast = if (n == 0) "这些歌都已经在本地了" else "已加入 $n 首到下载队列"
+        // 用户 m05942 第①点：已存在的歌不重复下，并且把「去哪儿补下」说清楚。
+        toast = when {
+            skipped > 0 ->
+                "有 $skipped 首歌在歌单中已存在，若仍要下载，请点击顶部提示的文件夹按钮到已下载音乐中右键点击歌曲下载无损"
+            n == 0 -> "这些歌都已经在本地了"
+            else -> "已加入 $n 首到下载队列"
+        }
+        if (n > 0) watchNoCopyright(songs)
+    }
+
+    /**
+     * 盯一批刚入队的歌，等它们全部落地后统计「没版权 / 只有试听」的条数
+     * （用户 m05942 第④点）。
+     *
+     * 只在整批都不再排队/下载时才说话：用户自己按的暂停不算「下不了」。
+     */
+    private fun watchNoCopyright(songs: List<Song>) {
+        val want = songs.map { it.id }.toSet()
+        viewModelScope.launch {
+            val deadline = System.currentTimeMillis() + 30 * 60_000L
+            while (System.currentTimeMillis() < deadline) {
+                delay(1500)
+                val mine = downloader.tasks.value.filter { it.songId in want }
+                if (mine.isEmpty()) return@launch
+                if (mine.any { it.state == Downloader.State.QUEUED || it.state == Downloader.State.RUNNING }) continue
+                val bad = mine.count {
+                    it.state == Downloader.State.ERROR &&
+                        Regex("无版权|下架|试听|会员|付费").containsMatchIn(it.error)
+                }
+                if (bad > 0) toast = "$bad 首因无版权无法下载"
+                return@launch
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ 云盘去重（m05942 ②）
+    /** 大小写/空白/常见标点差异不算不同：`^^` 这类符号要保留，不能被抹成空串。 */
+    private fun cloudNorm(s: String): String =
+        s.lowercase().replace(Regex("\\s+"), "")
+            .replace(Regex("[._\\-–—~～!！?？@#$%^&*()+=\\[\\]{};:'\",<>/\\\\|`]"), "")
+
+    /** `歌手 - 歌名` 拆开；拆不出来就当整串是歌名。括号后缀不剥（Live 版算另一首）。 */
+    private fun splitCloudName(base: String): Pair<String, String> {
+        val s = base.trim()
+        val i = s.indexOf(" - ")
+        return if (i > 0) s.substring(0, i).trim() to s.substring(i + 3).trim() else "" to s
+    }
+
+    /** 云盘里是否已有这一首（标题 + 歌手都对上才算）。 */
+    private fun cloudHasSong(baseNoExt: String): Boolean {
+        val (artist, title) = splitCloudName(baseNoExt)
+        val t = cloudNorm(title)
+        if (t.isEmpty()) return false
+        val a = cloudNorm(artist)
+        return cloudSongs.any { s ->
+            val ct = cloudNorm(s.name)
+            val ca = cloudNorm(s.artists.joinToString(" ") { it.name })
+            // ① 标题一致且歌手一致
+            (ct == t && ca == a) ||
+                // ② Android 传上去的条目，歌名就是文件名本身（没有拆歌手）
+                (ct == t && a.isEmpty()) ||
+                // ③ 文件名没拆出歌手时，按「云盘歌名 == 文件名」兜底
+                (a.isEmpty() && ct == cloudNorm(baseNoExt))
+        }
     }
 
     fun cancelDownload(key: String) = downloader.cancel(key)
@@ -1933,6 +2092,14 @@ sealed interface Route {
     data object Downloading : Route
     data object Settings : Route
     data object Search : Route
+
+    /**
+     * 音乐云盘（用户 m05071 第④点）。
+     *
+     * 侧栏里排在「播客」下面，和电脑端一致：云盘是「在线音乐」那一组里的第四个
+     * 入口，不属于本机音乐。
+     */
+    data object Cloud : Route
 
     /**
      * 播放队列页。

@@ -325,6 +325,8 @@ class Prefs(context: Context) {
             "radio" to "推荐歌单",
             "charts" to "榜单",
             "podcast" to "播客",
+            // 音乐云盘（用户 m05071 第④点）
+            "cloud" to "音乐云盘",
             "liked" to "我喜欢的音乐",
             "recent" to "最近播放",
             "downloads" to "已下载音乐",

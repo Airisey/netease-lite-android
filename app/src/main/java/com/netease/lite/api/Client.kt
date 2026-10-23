@@ -195,6 +195,34 @@ object Client {
         return json
     }
 
+    /**
+     * 原始字节 POST（音乐云盘直传 NOS 用，用户 m05718）。
+     *
+     * 和 [post] 不同：这条不走 /weapi/ 加密，目标是 NOS 的上传节点，鉴权全在
+     * 请求头里（`x-nos-token`）。Content-Length 交给 OkHttp 自己算，手写会和
+     * 实际长度不一致而被 NOS 判成 400。
+     */
+    suspend fun postBytes(url: String, bytes: ByteArray, headers: Map<String, String>): Int =
+        withContext(Dispatchers.IO) {
+            val type = headers["Content-Type"] ?: "audio/mpeg"
+            val req = Request.Builder()
+                .url(url)
+                .headers(headersOf(baseHeaders(headers)))
+                .post(bytes.toRequestBody(type.toMediaType()))
+                .build()
+            try {
+                http.newCall(req).execute().use { res ->
+                    absorb(res.headers)
+                    if (!res.isSuccessful) throw IOException("上传失败 HTTP ${res.code}")
+                    res.code
+                }
+            } catch (e: IOException) {
+                // 自己抛的「上传失败 HTTP xxx」原样往上送，别被翻译成「网络请求失败」。
+                if (e.message?.startsWith("上传失败") == true) throw e
+                throw TransportException(transportMessage(e), e)
+            }
+        }
+
     private fun headersOf(map: Map<String, String>): okhttp3.Headers {
         val b = okhttp3.Headers.Builder()
         for ((k, v) in map) b.add(k, v)
