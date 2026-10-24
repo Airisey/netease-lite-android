@@ -973,9 +973,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setPlaylistSubscribed(id: Long, subscribed: Boolean) {
         viewModelScope.launch {
             try {
-                Endpoints.subscribePlaylist(id, subscribed)
+                // m06618 第②点：原来不看返回值，服务端回 403 illegal request!
+                // 也照样弹「已收藏歌单」，用户看到的就是「提示成功但按钮不变」。
+                val ok = Endpoints.subscribePlaylist(id, subscribed)
+                if (!ok) {
+                    error = if (subscribed) "收藏失败，请稍后再试" else "取消收藏失败，请稍后再试"
+                    return@launch
+                }
                 val i = playlists.indexOfFirst { it.id == id }
                 if (i >= 0) playlists[i] = playlists[i].copy(subscribed = subscribed)
+                // 歌单页顶部那颗按钮读的是 playlistDetail，只改 playlists 不会让它翻面。
+                val d = playlistDetail
+                if (d != null && d.id == id) playlistDetail = d.copy(subscribed = subscribed)
                 toast = if (subscribed) "已收藏歌单" else "已取消收藏"
             } catch (e: Exception) {
                 error = explain(e)

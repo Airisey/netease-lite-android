@@ -113,8 +113,33 @@ object Client {
         return parse(text, path, lenient = false)
     }
 
+    /**
+     * 保证手里有一份 `__csrf`（对应桌面版 `NeteaseClient.ensureCsrf`）。
+     *
+     * 用户 m06618 第②点：安卓点「收藏」弹了 toast，但服务端其实没记住、按钮也不变。
+     * 根因和桌面一模一样：保存下来的 cookie 只有 `MUSIC_U` / `NMTID`，
+     * [post] 拼出的 `?csrf_token=` 一直是空串，而 `/playlist/subscribe`、
+     * `/playlist/unsubscribe` 会校验它 —— 空值直接回 403 `illegal request!`。
+     *
+     * `__csrf` 只能由服务端下发，客户端算不出来：带着 cookie GET `/discover`
+     * 会回两条 `Set-Cookie: __csrf=…`（`/` 首页什么都不回），[send] 里的
+     * absorb 会把它们收进 [CookieJar]。
+     */
+    suspend fun ensureCsrf(force: Boolean = false): String {
+        if (!force && CookieJar.csrf.isNotEmpty()) return CookieJar.csrf
+        if (!CookieJar.isLoggedIn) return ""
+        try {
+            send(Request.Builder().url(Http.BASE + "/discover").headers(headersOf(baseHeaders())).get().build())
+        } catch (_: TransportException) {
+            // 拿不到就让上层照常报错，不在这里伪造成「已收藏」。
+        }
+        return CookieJar.csrf
+    }
+
     /** 加密 POST /weapi/。 */
     suspend fun post(path: String, data: JSONObject = JSONObject(), lenient: Boolean = false): JSONObject {
+        // 改状态的接口要求 csrf_token，缺了就是 403 illegal request!（m06618 第②点）。
+        if (CookieJar.csrf.isEmpty() && CookieJar.isLoggedIn) ensureCsrf()
         val clean = path.removePrefix("/weapi/").removePrefix("/")
         val url = "${Http.BASE}/weapi/$clean?csrf_token=${CookieJar.csrf}"
         val form = FormBody.Builder()
