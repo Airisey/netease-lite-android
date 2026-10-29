@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -718,9 +719,29 @@ private fun LyricPanel(vm: AppViewModel, modifier: Modifier = Modifier) {
         return
     }
 
-    val pos = vm.player.positionMs
+    // 每帧算一次「此刻」的进度，而不是直接用 `positionMs`。
+    //
+    // 用户报的「歌词不同步（同一首歌电脑端正常）」：`positionMs` 是 500ms 一次的
+    // 心跳采样（`PlayerController.tick`），拿它去比行时间戳，歌词最多要晚半拍才
+    // 翻页 —— 一句两三个字的短句都唱完了，高亮还在上一句。桌面端
+    // （`renderer/js/lrc.js`）是 `requestAnimationFrame` 每帧用 `audio.currentTime`
+    // 重算的，所以没有这个问题。
+    //
+    // `positionNow()` 把采样值加上「距采样过了多久」，效果与桌面一致。
+    // 这里用 `framePos` + `derivedStateOf`：逐帧变的是 `framePos`，而 `active`
+    // 只在跨过某一行的时间戳时才变，中间那些帧不会引起重组。
+    val framePos = remember { mutableStateOf(vm.player.positionMs) }
+    LaunchedEffect(Unit) {
+        while (true) withFrameNanos { framePos.value = vm.player.positionNow() }
+    }
     // 最后一条时间戳不晚于当前进度的行就是正在唱的那句。
-    val active = lines.indexOfLast { it.timeMs <= pos }.coerceAtLeast(0)
+    //
+    // `+ 60` 与桌面端一致（`lrc.js` 的 `activeIndex()` 是
+    // `lastIndexAtOrBefore(times, ms + 60)`）：滚动是缓动逼近，提前 60ms 换行才
+    // 不会看着「慢半行」。
+    val active by remember(lines) {
+        derivedStateOf { lines.indexOfLast { it.timeMs <= framePos.value + 60L }.coerceAtLeast(0) }
+    }
 
     // 歌词面板：选中行居中，上下还能看见前后文。
     //

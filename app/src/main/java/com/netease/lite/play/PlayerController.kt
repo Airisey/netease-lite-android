@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -43,6 +44,13 @@ class PlayerController(private val scope: CoroutineScope) {
         private set
     var positionMs: Long by mutableStateOf(0L)
         private set
+
+    /**
+     * [positionMs] 最后一次被赋值的时刻（[SystemClock.elapsedRealtime]，毫秒）。
+     *
+     * 只在主线程写，读的人也在主线程（[positionNow] 由界面每帧调用），不用加锁。
+     */
+    private var positionStamp = 0L
     var durationMs: Long by mutableStateOf(0L)
         private set
     var bufferedMs: Long by mutableStateOf(0L)
@@ -261,6 +269,18 @@ class PlayerController(private val scope: CoroutineScope) {
      * 时效，提前把整队列的地址取一遍等于白取。真正播放时由
      * [PlaceholderDataSourceFactory] 在数据源层把它换成真直链：只有那样才能
      * 同时覆盖界面点歌、通知栏下一首、蓝牙按键三条入口。
+     *
+     * ## 随机模式下为什么「先洗后给」（用户报的「点歌不切歌」）
+     *
+     * 这里原来写的是「先 `setMediaItems(songs, fromIndex)`，再洗 `queueSongs`
+     * 并调 `reorder()`」。`MediaController` 上的 `setMediaItems` 是把命令送回
+     * 会话的**异步**调用，紧接着读 `currentMediaItemIndex` / `getMediaItemAt()`
+     * 拿到的还是上一份队列 —— 于是 `reorder()` 是拿旧队列去凑新顺序，算出来的
+     * 每一个 `moveMediaItem` 都是错的；对不上时它还会退到 [rebuildItems]，而
+     * 那里按 `currentSong`（此刻仍是**上一首**）反查下标：查不到就从头播、查得到
+     * 就把播放指针挪回上一首。表现正是「点了别的歌，放出来的还是刚才那首」。
+     *
+     * 顺序一开始就洗好、只发一条 `setMediaItems`，这两个坑就都不存在了。
      */
     fun playList(
         songs: List<Song>,
@@ -271,27 +291,38 @@ class PlayerController(private val scope: CoroutineScope) {
     ) {
         val c = controller ?: return
         if (songs.isEmpty()) return
-        queueSongs = songs
         this.contextId = contextId
         this.contextName = contextName
         // 换个来源就等于换一份「原始顺序」，旧的随机还原点作废。
         originalSongs = songs
-        val items = songs.map { placeholderItem(it) }
+        // 随机模式必须**先**把顺序洗好，再一次性交给播放器 —— 理由见函数头的长注释。
+        val ordered = if (repeatMode == Playback.SHUFFLE) {
+            QueueState(songs = songs, index = fromIndex, originalOrder = songs).toShuffle().songs
+        } else {
+            songs
+        }
+        // 洗过之后要点的那首被 `toShuffle()` 钉在首位，起点固定是 0；顺序模式起点就是 fromIndex。
+        val startAt = if (repeatMode == Playback.SHUFFLE) 0 else fromIndex.coerceIn(0, ordered.lastIndex)
+        // 队列先落定（queueSongs 的 setter 直接转发给 queue）。
+        queueSongs = ordered
         // 用户主动起播：清掉「上一次开播的 id」，这样即便点的还是刚才那一首，
         // onMediaItemTransition 的去重也不会把这次开播吞掉（见 lastStartedId）。
         lastStartedId = 0L
-        c.setMediaItems(items, fromIndex, 0L)
+        c.setMediaItems(ordered.map { placeholderItem(it) }, startAt, 0L)
         c.prepare()
         // autoPlay=false 是「恢复上次播放」用的：队列摆好、停在那个位置，但不自己出声。
         c.playWhenReady = autoPlay
-        if (repeatMode == Playback.SHUFFLE) {
-            queueSongs = QueueState(songs = queueSongs, index = fromIndex, originalOrder = originalSongs)
-                .toShuffle()
-                .songs
-            reorder()
-        }
-        syncQueue()
-        syncCurrent()
+        // 界面状态直接按用户点的那首写，**不要**回读控制器：上面那条 `setMediaItems`
+        // 是把命令送回会话的异步调用，回读 `currentMediaItemIndex` 拿到的还是上一首
+        // 的下标，套进新列表就是另一首歌。真正对齐由 onMediaItemTransition 完成。
+        queueSize = ordered.size
+        queueIndex = startAt
+        currentSong = ordered.getOrNull(startAt)
+        // 换歌就等于进度归零：不清的话歌词面板会拿上一首的进度去高亮，
+        // 进度条也会在新歌开头停半拍才回位。
+        positionMs = 0L
+        bufferedMs = 0L
+        positionStamp = SystemClock.elapsedRealtime()
         persist()
     }
 
@@ -422,7 +453,34 @@ class PlayerController(private val scope: CoroutineScope) {
     fun seekTo(ms: Long) {
         controller?.seekTo(ms.coerceAtLeast(0L))
         positionMs = ms.coerceAtLeast(0L)
+        positionStamp = SystemClock.elapsedRealtime()
         currentSong?.let { onProgress?.invoke(it, positionMs) }
+    }
+
+    /**
+     * 估算**此刻**的播放位置（毫秒）。
+     *
+     * 用户报的「歌词不同步」（同一首歌电脑端正常）：`positionMs` 由 [tick] 每
+     * 500ms 采一次，而桌面端是跟着 `requestAnimationFrame` 每帧用
+     * `audio.currentTime` 重算的 —— 安卓这边的歌词行因此最多慢半拍才翻页，
+     * 短句（一句两三个字的那种）尤其明显：句子都唱完了高亮还没过来。
+     *
+     * 采样点之间不必再问控制器，用单调时钟往前推就够准：播放中
+     * `positionMs + 距上次采样的毫秒数` 就是当前进度，误差只剩时钟漂移。
+     * 只在 `isPlaying` 时推 —— 缓冲/暂停时位置本来就不动，免得进度条自己跑。
+     *
+     * 上限 [DRIFT_MAX_MS] 纯属防御：万一 ticker 被主线程卡住（刚进页面做大列表
+     * 布局、或切歌那一下），不至于让高亮一路飞到歌尾；超出就等下一次采样纠正。
+     */
+    fun positionNow(): Long {
+        val c = controller ?: return positionMs
+        if (!c.isPlaying) return positionMs
+        val since = SystemClock.elapsedRealtime() - positionStamp
+        // 采样太旧说明位置已经不是「刚量的」（缓冲、被主线程卡住、刚恢复上次进度）：
+        // 这种情况不往外推，宁可先显示上一次的采样值，等下一次 tick 纠正。
+        if (since !in 0..DRIFT_MAX_MS) return positionMs
+        val at = positionMs + since
+        return if (durationMs > 0) at.coerceAtMost(durationMs) else at
     }
 
     /**
@@ -605,6 +663,8 @@ class PlayerController(private val scope: CoroutineScope) {
         if (c.playbackState != Player.STATE_IDLE) {
             positionMs = c.currentPosition.coerceAtLeast(0L)
             bufferedMs = c.bufferedPosition.coerceAtLeast(0L)
+            // 记下采样时刻，界面每帧要拿它把进度往当前时间推（见 positionNow）。
+            positionStamp = SystemClock.elapsedRealtime()
         }
         if (durationMs <= 0) durationMs = c.duration.coerceAtLeast(0L)
         val song = currentSong ?: return
@@ -782,8 +842,20 @@ class PlayerController(private val scope: CoroutineScope) {
         pendingSeekMs = 0
         controller?.seekTo(ms)
         positionMs = ms
+        positionStamp = SystemClock.elapsedRealtime()
     }
 
     /** 队列里当前这首歌在原始列表里的下标（随机播放时对不上，交给 UI 判断）。 */
     fun queueSongsSnapshot(): List<Song> = queueSongs
+
+    companion object {
+        /**
+         * [positionNow] 允许往前推的最大毫秒数。
+         *
+         * ticker 是 500ms 一拍，正常只会用到 0~500；给到 2000 是留出主线程偶尔
+         * 忙一下的余量。超过这个值就说明采样已经不新鲜了（暂停、缓冲、或进度
+         * 刚被跳转重写），此时外推只会算出错误的位置。
+         */
+        private const val DRIFT_MAX_MS = 2000L
+    }
 }
