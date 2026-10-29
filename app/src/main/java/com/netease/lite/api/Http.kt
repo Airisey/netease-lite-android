@@ -65,6 +65,12 @@ object CookieJar {
     @Synchronized
     fun get(key: String): String? = map[key]
 
+    /** 补一个「环境标识」类的 cookie（如 `os=pc`），已有值时不覆盖。 */
+    @Synchronized
+    fun setIfAbsent(key: String, value: String) {
+        if (!map.containsKey(key)) map[key] = value
+    }
+
     /** 供 App 方言自己拼 Cookie 头用。 */
     @Synchronized
     fun snapshot(): Map<String, String> = LinkedHashMap(map)

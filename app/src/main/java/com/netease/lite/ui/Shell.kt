@@ -1088,6 +1088,16 @@ fun LoginScreen(vm: AppViewModel) {
         qrImage = runCatching {
             Endpoints.imageBytes(r.imageUrl)?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size)?.asImageBitmap() }
         }.getOrNull()
+        // 图片没取到（CDN 挂防盗链 / 明文 http 被拦 / 返回的不是图）不代表这条路断了：
+        // 以前 qrImage 为空、qrErr 也为空，二维码那块就是一片空白 —— 用户看到的就是
+        // 「加载不出二维码」。这里把话说清楚，并指出下面的「用本机浏览器打开验证页」。
+        if (qrImage == null) {
+            qrErr = if (r.verifyUrl.isNotBlank()) {
+                "二维码图片没取到，点下面的「用本机浏览器打开验证页」也能完成验证"
+            } else {
+                "二维码图片没取到，点「刷新二维码」再试一次"
+            }
+        }
         qrBusy = false
     }
 
@@ -1247,6 +1257,13 @@ fun LoginScreen(vm: AppViewModel) {
                                     .align(Alignment.CenterHorizontally)
                                     .size(180.dp)
                                     .clip(RoundedCornerShape(8.dp)),
+                            )
+                            // 兜底：三个分支都不命中时别再留一片空白（旧版就是这样，
+                            // 表现成「二维码加载不出来」）。
+                            else -> Text(
+                                "二维码没准备好，点「刷新二维码」重来一次。",
+                                color = skin.text3,
+                                fontSize = 12.5.sp,
                             )
                         }
                         // H5 验证链接：同一台手机上直接点开最省事（不用找第二台设备扫码）。

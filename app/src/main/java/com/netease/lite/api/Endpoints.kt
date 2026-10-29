@@ -1115,7 +1115,7 @@ object Endpoints {
                 // -462 是账号级风控门（新设备登录时网易云回的就是「请确认是否本人账号」）。
                 // 服务端那句话本身没告诉用户下一步怎么做，这里给一句能操作的；
                 // 真正能做的动作由 [verify] 交给界面弹安全验证。
-                code == -462 -> "网易云要求先完成安全验证（请确认是否本人账号）"
+                code == -462 -> "网易云要求先完成安全验证（请确认是否本人账号）。可以改用密码登录，或过一会儿再试"
                 message.isNotBlank() -> message
                 code == 400 -> "手机号或密码格式不对"
                 code == 502 -> "账号或密码错误"
@@ -1134,7 +1134,9 @@ object Endpoints {
      * 桌面版踩过同一个坑（`netease-lite\electron\api\endpoints.js` 的 `loginPhone`）。
      */
     suspend fun loginPhone(phone: String, password: String, countrycode: String = "86"): LoginResult {
+        ensureOsCookie()
         return loginGated(
+            "/login/cellphone",
             JSONObject()
                 .put("phone", phone)
                 .put("password", md5Hex(password))
@@ -1143,19 +1145,53 @@ object Endpoints {
         )
     }
 
-    /** 手机号 + 验证码登录（先 [sendCaptcha]）。 */
+    /**
+     * 手机号 + 验证码登录（先 [sendCaptcha]）。
+     *
+     * 验证码是**服务端**按账号/环境下发的，客户端指定不了位数。能控制的是把码提到哪个
+     * 接口，历史上有三个口子，依次都试：
+     *
+     * 1. `/w/login/cellphone`：网易网页端登录页用的口子（官方接口库
+     *    `login_cellphone.js` 就是它，参数 `type=1` + `https=true` + 手机号/验证码）。
+     * 2. `/login/cellphone` 带 `captcha`：老口子。
+     * 3. `/sms/captcha/verify`：验证码校验接口，校验通过时响应里也带登录态。
+     *
+     * 谁成功用谁；都失败时返回**最后一条**的真实错误（例如「验证码错误」）。撞上
+     * `-462`（账号级风控，换接口没用）立刻返回，让界面弹安全验证二维码。
+     */
     suspend fun loginCaptcha(phone: String, captcha: String, countrycode: String = "86"): LoginResult {
+        ensureOsCookie()
+        val base = JSONObject()
+            .put("phone", phone)
+            .put("captcha", captcha)
+            .put("countrycode", countrycode)
+            .put("rememberLogin", "true")
+
+        val w = loginGated("/w/login/cellphone", JSONObject(base.toString()).put("type", "1").put("https", "true"))
+        if (w.ok || w.verify != null) return w
+
+        val plain = loginGated("/login/cellphone", JSONObject(base.toString()))
+        if (plain.ok || plain.verify != null) return plain
+
         return loginGated(
+            "/sms/captcha/verify",
             JSONObject()
-                .put("phone", phone)
-                .put("captcha", captcha)
-                .put("countrycode", countrycode)
-                .put("rememberLogin", "true"),
+                .put("cellphone", phone)
+                .put("ctcode", countrycode)
+                .put("captcha", captcha),
         )
     }
 
     /**
-     * `/login/cellphone` 的统一出口：把 `-462`（账号级安全验证门）连同它带回的
+     * 让请求看起来像 PC 网页端（和官方接口库一样在登录前把 `os` 设成 `pc`）。
+     *
+     * 我们的 jar 里平时只有 `MUSIC_U` / `NMTID`，缺这个环境标识时服务端看到的
+     * 是一个「什么客户端都不是」的陌生会话，-462 风控更容易直接命中。
+     */
+    private fun ensureOsCookie() = CookieJar.setIfAbsent("os", "pc")
+
+    /**
+     * 登录类接口的统一出口：把 `-462`（账号级安全验证门）连同它带回的
      * 一整套 `verifyType / verifyId / verifyToken / event_id / sign` 一起交给界面。
      *
      * 为什么不能继续用 `Client.tryPost`：它把非 200 压成 `{code, message}`，
@@ -1163,8 +1199,8 @@ object Endpoints {
      * `followOutcome` 踩过同一个坑，见 `netease-lite\electron\api\endpoints.js`）。
      * 所以这里直接调 [Client.post] 并显式接住 [ApiException]。
      */
-    private suspend fun loginGated(data: JSONObject): LoginResult = try {
-        val j = Client.post("/login/cellphone", data)
+    private suspend fun loginGated(path: String, data: JSONObject): LoginResult = try {
+        val j = Client.post(path, data)
         LoginResult(j.optInt("code", 500), j.optString("message"))
     } catch (e: ApiException) {
         val v = riskVerifyFrom(e.payload)
@@ -1179,7 +1215,9 @@ object Endpoints {
 
     /** 从 `-462` 的响应体里抽出安全验证参数；形状不对时返回 null。 */
     private fun riskVerifyFrom(payload: JSONObject?): RiskVerify? {
-        val d = payload?.optJSONObject("data") ?: return null
+        // 有的接口把参数包在 `data` 里，有的直接摊在顶层 —— 两个形状都认，
+        // 否则界面只会显示一句「请确认是否本人账号」，换二维码那条路走不下去。
+        val d = payload?.optJSONObject("data") ?: payload ?: return null
         val token = d.optString("verifyToken")
         if (token.isEmpty()) return null
         val params = d.optJSONObject("params")
@@ -1239,17 +1277,26 @@ object Endpoints {
 
     /** 把一张图片抓成字节（安全验证二维码用：CDN 有防盗链，Coil 裸取会被 403）。 */
     suspend fun imageBytes(url: String): ByteArray? = withContext(Dispatchers.IO) {
-        try {
-            val req = okhttp3.Request.Builder()
-                .url(url)
-                .header("User-Agent", Http.UA)
-                .header("Referer", Http.BASE + "/")
-                .get()
-                .build()
-            Client.http.newCall(req).execute().use { res -> res.body?.bytes() }
-        } catch (e: Exception) {
-            null
+        if (url.isBlank()) return@withContext null
+        // 明文 http 会被 `AndroidManifest.xml` 的 `usesCleartextTraffic="false"` 直接掐掉
+        // （抛出 IOException → 上面 catch 成 null → 二维码一片空白）。跟 NOS 上传节点
+        // 踩的是同一个坑：先按 https 试，不行再退回原样再试一次。
+        val https = if (url.startsWith("http://")) "https://" + url.removePrefix("http://") else url
+        fetchImageBytes(https) ?: (if (https != url) fetchImageBytes(url) else null)
+    }
+
+    private fun fetchImageBytes(url: String): ByteArray? = try {
+        val req = okhttp3.Request.Builder()
+            .url(url)
+            .header("User-Agent", Http.UA)
+            .header("Referer", Http.BASE + "/")
+            .get()
+            .build()
+        Client.http.newCall(req).execute().use { res ->
+            if (res.isSuccessful) res.body?.bytes() else null
         }
+    } catch (e: Exception) {
+        null
     }
 
     /**
@@ -1257,6 +1304,7 @@ object Endpoints {
      * —— 第④点的冷却要按真实结果决定「能不能再点」，所以不能只给布尔。
      */
     suspend fun sendCaptcha(phone: String, countrycode: String = "86"): String? {
+        ensureOsCookie()
         val j = Client.tryPost("/sms/captcha/sent", JSONObject().put("cellphone", phone).put("ctcode", countrycode))
         val code = j.optInt("code", 500)
         if (code == 200) return null
