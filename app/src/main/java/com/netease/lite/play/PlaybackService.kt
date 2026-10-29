@@ -288,6 +288,16 @@ class PlaybackService : MediaSessionService() {
                     Player.COMMAND_STOP,
                     Player.COMMAND_SEEK_TO_DEFAULT_POSITION,
                     Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
+                    // 「点队列里的某一首」要的正是这一条（用户 2026-10-29 报的
+                    // 「点播放队列里的歌不切歌」就是这个漏了）。
+                    //
+                    // 控制器上 `seekTo(index, …)` 换的是**另一首**，Media3 要的是
+                    // `COMMAND_SEEK_TO_MEDIA_ITEM`；不在白名单里时 MediaController
+                    // 会把它当场丢掉，日志里只有一行
+                    // `Controller isn't allowed to call command= 10`。
+                    // 而 `playWhenReady = true` 是允许的，所以现象特别像「没反应」：
+                    // 歌声没换，只是从当前这首的位置接着往下放。
+                    Player.COMMAND_SEEK_TO_MEDIA_ITEM,
                     Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
                     Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
                     Player.COMMAND_SEEK_TO_NEXT,

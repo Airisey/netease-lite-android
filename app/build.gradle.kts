@@ -4,7 +4,7 @@ import java.util.Properties
 //
 // 版本口径来自用户指定（m38831）：
 //   minSdk 26（Android 8.0）/ targetSdk 36 / compileSdk 36
-//   applicationId com.netease.lite，versionCode 3，versionName 1.1.1
+//   applicationId com.netease.lite，versionCode 4，versionName 1.1.2
 // 竖屏为主且不支持横屏 —— 屏幕方向锁在 Manifest 里（screenOrientation="portrait"），
 // 这样折叠屏展开、平板横置都不会把界面拉变形。
 //
@@ -33,8 +33,8 @@ android {
         applicationId = "com.netease.lite"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.1.1"
+        versionCode = 4
+        versionName = "1.1.2"
     }
 
     androidResources {

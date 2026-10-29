@@ -423,7 +423,15 @@ class PlayerController(private val scope: CoroutineScope) {
         if (index !in queueSongs.indices) return
         // 用户主动点某一首：清掉去重记忆（见 lastStartedId），重播同一首也算新开播。
         lastStartedId = 0L
-        c.seekTo(index, 0L)
+        if (c.availableCommands.contains(Player.COMMAND_SEEK_TO_MEDIA_ITEM)) {
+            c.seekTo(index, 0L)
+        } else {
+            // 会话没给 `COMMAND_SEEK_TO_MEDIA_ITEM` 时（[PlaybackService.onConnect]
+            // 的白名单漏写过一次），`seekTo(index, …)` 会被 MediaController 直接丢掉，
+            // 用户看到的就是「点了队列里的歌，歌声没换、只是从当前这首接着放」。
+            // `COMMAND_CHANGE_MEDIA_ITEMS` 一直在，所以退一步：整批重摆 + 指定起播位。
+            c.setMediaItems(queueSongs.map { placeholderItem(it) }, index, 0L)
+        }
         c.prepare()
         c.playWhenReady = true
         syncCurrent()
